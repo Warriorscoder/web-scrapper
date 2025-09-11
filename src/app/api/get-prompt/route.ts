@@ -176,13 +176,11 @@ const getPlanFromLLM = async (userPrompt: string): Promise<Plan> => {
 
 // --- STAGE 2: GOOGLE SEARCH EXECUTION ---
 
-// Define a type for the items returned by the Google Search API for better type safety
 interface GoogleSearchItem {
     link: string;
     snippet: string;
 }
 
-// ** NECESSARY CHANGE 2: Update the function to return a list of URLs (string[]) **
 const callGoogleSearchApi = async (searchQuery: string, numResults = 30): Promise<string[]> => {
     const apiKey = process.env.GOOGLE_API_KEY;
     const cseId = process.env.GOOGLE_CSE_ID;
@@ -192,7 +190,7 @@ const callGoogleSearchApi = async (searchQuery: string, numResults = 30): Promis
     }
 
     let allUrls: string[] = [];
-    const numRequests = Math.ceil(numResults / 10); // Calculate how many pages to fetch
+    const numRequests = Math.ceil(numResults / 10); 
 
     for (let i = 0; i < numRequests; i++) {
         const startIndex = i * 10 + 1;
@@ -206,18 +204,17 @@ const callGoogleSearchApi = async (searchQuery: string, numResults = 30): Promis
             const urls = items.map((item) => item.link);
             allUrls = allUrls.concat(urls);
 
-            // If Google returns less than 10 results, it means we've reached the end.
+           
             if (items.length < 10) {
                 break; 
             }
         } catch (error) {
             console.error(`Error fetching page ${i + 1} of Google Search results:`, error);
-            // Stop trying if one of the pages fails
             break;
         }
     }
 
-    return allUrls.slice(0, numResults); // Return the final list, capped at the desired number
+    return allUrls.slice(0, numResults); 
 };
 
 
@@ -233,9 +230,11 @@ export async function POST(req: Request) {
         // STAGE 1: Generate the plan
         console.log("--- Starting Stage 1: Planning ---");
         const plan = await getPlanFromLLM(prompt);
-        // Only destructure the variable we need for this stage
+
         const { searchApiQuery, extractionPrompt } = plan;
         console.log("Stage 1 complete. Generated plan:", plan);
+
+        
         // STAGE 2: Execute the search
         console.log("--- Starting Stage 2: Searching ---");
 
