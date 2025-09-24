@@ -1,7 +1,19 @@
-import type { NextConfig } from "next";
+import { Configuration } from 'webpack';
 
-const nextConfig: NextConfig = {
-  /* config options here */
+/** @type {import('next').NextConfig} */
+const nextConfig = {
+
+  webpack: (config: Configuration) => {
+    if (config.module && config.module.rules) {
+        config.module.rules.push({
+          test: /\.map$/,
+          use: 'ignore-loader',
+        });
+    }
+
+    return config;
+  },
 };
 
-export default nextConfig;
+module.exports = nextConfig;
+
