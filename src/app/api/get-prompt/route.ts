@@ -309,29 +309,26 @@ const getPlanFromLLM = async (userPrompt: string): Promise<Plan> => {
 interface GoogleSearchItem { link: string; }
 
 // ** NECESSARY CHANGE 1: The function no longer caches search queries. It only handles rate limiting. **
-const findRelevantUrls = async (searchQuery: string, ip: string, numResults = 2): Promise<string[]> => {
+const findRelevantUrls = async (searchQuery: string, numResults = 2): Promise<string[]> => {
     const apiKey = process.env.GOOGLE_API_KEY;
     const cseId = process.env.GOOGLE_CSE_ID;
     if (!apiKey || !cseId) throw new Error("Google API Key or CSE ID is not set.");
 
-    const rateLimitKey = `google_api_limit:${ip}`;
+    // Create a global, date-based key for the rate limit
+    const today = new Date().toISOString().split('T')[0]; // Gets date in YYYY-MM-DD format
+    const rateLimitKey = `google_api_limit:${today}`;
     const DAILY_LIMIT = 90;
 
     let allUrls: string[] = [];
     const numRequests = Math.ceil(numResults / 10);
-
     for (let i = 0; i < numRequests; i++) {
-        // Correct Logic: Increment first, then check the new value.
         const currentUsage = await redis.incr(rateLimitKey);
-        
-        // If this is the first request of the day, set the 24-hour expiry.
         if (currentUsage === 1) {
-            await redis.expire(rateLimitKey, 86400);
+            await redis.expire(rateLimitKey, 86400); // Set expiry on the first request of the day
         }
 
-        // Now, check if the incremented value has exceeded the limit.
         if (currentUsage > DAILY_LIMIT) {
-            throw new Error("You have exceeded your daily Google Search API limit.");
+            throw new Error("The application's daily Google Search API limit has been reached.");
         }
         
         const startIndex = i * 10 + 1;
@@ -343,9 +340,8 @@ const findRelevantUrls = async (searchQuery: string, ip: string, numResults = 2)
             allUrls = allUrls.concat(items.map((item) => item.link));
             if (items.length < 10) break;
         } catch (error) {
+            await redis.decr(rateLimitKey); // Decrement if the API call failed
             console.error(`Error fetching page ${i + 1} of Google Search results:`, error);
-            // Decrement the counter if the API call fails, so it's not a "wasted" request.
-            await redis.decr(rateLimitKey); 
             break;
         }
     }
@@ -392,7 +388,6 @@ export async function POST(req: Request) {
         return NextResponse.json({ message: 'Prompt is required' }, { status: 400 });
     }
 
-    const ip = req.headers.get('x-forwarded-for') ?? '127.0.0.1';
     let browser = null;
     
     try {
@@ -401,50 +396,20 @@ export async function POST(req: Request) {
         console.log("Stage 1 complete. Generated plan:", plan);
 
         // STAGE 2
-        const urls = await findRelevantUrls(plan.searchApiQuery, ip);
-        console.log(`Stage 2: Found ${urls.length} potential URLs.`);
+        // ** NECESSARY CHANGE: Call the function without the 'ip' argument **
+        const urls = await findRelevantUrls(plan.searchApiQuery);
+        const urlsToScrape = urls.slice(0, 5);
+        console.log(`Stage 2 complete. Found ${urls.length} URLs, scraping top ${urlsToScrape.length}.`);
 
-        // ** NECESSARY CHANGE 3: The new, efficient caching and scraping logic **
-        const urlsToScrape: string[] = [];
-        const cachedContents: string[] = [];
-        const CACHE_EXPIRATION_SECONDS = 86400; // 24 hours
+        browser = await chromium.launch({ headless: true });
+        const context = await browser.newContext({
+             userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+        });
+        const scrapedContents = await Promise.all(
+            urlsToScrape.map(url => scrapeFullPageContent(context, url))
+        );
+        const combinedContent = scrapedContents.join('\n\n---\n\n');
 
-        // Check cache for each URL before deciding to scrape
-        for (const url of urls) {
-            const cacheKey = `scrape_cache:${url}`;
-            const cachedContent = await redis.get<string>(cacheKey);
-            if (cachedContent) {
-                console.log(`  > [CACHE HIT] Using cached content for: ${url}`);
-                cachedContents.push(cachedContent);
-            } else {
-                console.log(`  > [CACHE MISS] URL queued for scraping: ${url}`);
-                urlsToScrape.push(url);
-            }
-        }
-
-        let newlyScrapedContents: string[] = [];
-        if (urlsToScrape.length > 0) {
-            browser = await chromium.launch({ headless: true });
-            const context = await browser.newContext({
-                 userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-            });
-            
-            // Scrape all missing URLs in parallel
-            const scrapePromises = urlsToScrape.map(async (url) => {
-                const content = await scrapeFullPageContent(context, url);
-                // If scrape was successful, cache the new content
-                if (!content.startsWith('Error scraping')) {
-                    const cacheKey = `scrape_cache:${url}`;
-                    await redis.set(cacheKey, content, { ex: CACHE_EXPIRATION_SECONDS });
-                }
-                return content;
-            });
-            
-            newlyScrapedContents = await Promise.all(scrapePromises);
-        }
-
-        const combinedContent = [...cachedContents, ...newlyScrapedContents].join('\n\n---\n\n');
-        
         // STAGE 3
         const structuredData = await extractStructuredData(plan.extractionPrompt, combinedContent);
         console.log("Stage 3 complete. Extracted structured data:", structuredData);
