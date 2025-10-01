@@ -245,12 +245,30 @@ const getPlanFromLLM = async (userPrompt: string): Promise<Plan> => {
     });
 
     const promptTemplate = new PromptTemplate({
-        template: `You are an AI planner. Based on the user prompt, create:
-1. searchApiQuery → a Google query
-2. extractionPrompt → detailed extraction instructions
-Return JSON only.
-{format_instructions}
-User prompt: {prompt}`,
+        template: `You are an expert AI planner for a generalized web scraping system. Your task is to take a user's request and output a structured JSON plan.
+
+         Steps:
+         1. Analyze Intent: Understand the user’s explicit request AND infer the implicit, commonly expected details for that type of data. (Example: for jobs → company, role, salary, job description, apply link; for restaurants → name, address, rating, cuisine, contact; for products → title, price, brand, description, buy link).
+         2. Define Schema: Build a schema that covers both explicit fields requested by the user and reasonable implicit fields that users would expect for this type of query. Keep field names concise and consistent.
+         3. Generate Plan: Return a JSON object with two keys:
+         - searchApiQuery → A focused query for Google Search API that is broad enough to find reliable sources, but precise enough to target authoritative directories, review platforms, or relevant sites.
+         - extractionPrompt → A detailed instruction for extracting structured data from raw JSON/HTML. It must:
+             • List each field from the schema explicitly.
+             • Include both requested and inferred fields.
+             • Use "N/A" when a field is missing.
+             • Be reusable across varied website structures.
+
+         Rules:
+         - Output must be a valid JSON object only (no text or markdown).
+         - Always balance explicit user needs with implicit expectations for that domain.
+         - Ensure schema is suitable for tabular export (Excel/CSV).
+         - Field values should be clean, human-readable, and consistent.
+         - exclude LinkedIn from search
+         - exclude Reddit from search 
+         {format_instructions}
+
+        User’s request:
+         {prompt}`,
         inputVariables: ["prompt"],
         partialVariables: { format_instructions: `{"searchApiQuery": "...", "extractionPrompt": "..."}` },
     });
