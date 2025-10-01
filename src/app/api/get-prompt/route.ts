@@ -202,8 +202,8 @@ import { OutputFixingParser } from "langchain/output_parsers";
 import { PromptTemplate } from "@langchain/core/prompts";
 import { z } from "zod";
 import axios from 'axios';
-import { Browser, BrowserContext } from 'playwright-core';
-import chromium from 'chrome-aws-lambda';
+import puppeteer, { Browser } from "puppeteer-core";
+import chromium from "@sparticuz/chromium-min";
 import { redis } from '../../../lib/redis'; 
 
 // --- STAGE 1: AI PLANNER ---
@@ -216,6 +216,7 @@ type Plan = z.infer<typeof planSchema>;
 const planParser = StructuredOutputParser.fromZodSchema(planSchema);
 
 const getPlanFromLLM = async (userPrompt: string): Promise<Plan> => {
+    // This function remains unchanged...
     const apiKey = process.env.GROQ_API_KEY;
     if (!apiKey) throw new Error("GROQ_API_KEY is not set in environment variables.");
 
@@ -259,33 +260,23 @@ const getPlanFromLLM = async (userPrompt: string): Promise<Plan> => {
     return await chain.invoke({ prompt: userPrompt });
 };
 
-
-// --- STAGE 2: GOOGLE SEARCH EXECUTION ---
+// --- STAGE 2: URL FINDER & SCRAPER ---
 
 interface GoogleSearchItem { link: string; }
-
-// ** NECESSARY CHANGE 1: Re-implementing the global rate limiter **
-const findRelevantUrls = async (searchQuery: string, numResults = 2): Promise<string[]> => {
+const findRelevantUrls = async (numResults = 2, searchQuery: string): Promise<string[]> => {
+    // This function remains unchanged...
     const apiKey = process.env.GOOGLE_API_KEY;
     const cseId = process.env.GOOGLE_CSE_ID;
     if (!apiKey || !cseId) throw new Error("Google API Key or CSE ID is not set.");
-
     const today = new Date().toISOString().split('T')[0];
     const rateLimitKey = `google_api_limit:${today}`;
     const DAILY_LIMIT = 90;
-
     let allUrls: string[] = [];
     const numRequests = Math.ceil(numResults / 10);
     for (let i = 0; i < numRequests; i++) {
         const currentUsage = await redis.incr(rateLimitKey);
-        if (currentUsage === 1) {
-            await redis.expire(rateLimitKey, 86400);
-        }
-
-        if (currentUsage > DAILY_LIMIT) {
-            throw new Error("The application's daily Google Search API limit has been reached.");
-        }
-        
+        if (currentUsage === 1) await redis.expire(rateLimitKey, 86400);
+        if (currentUsage > DAILY_LIMIT) throw new Error("The application's daily Google Search API limit has been reached.");
         const startIndex = i * 10 + 1;
         const url = `https://www.googleapis.com/customsearch/v1?key=${apiKey}&cx=${cseId}&q=${encodeURIComponent(searchQuery)}&start=${startIndex}`;
         try {
@@ -302,11 +293,12 @@ const findRelevantUrls = async (searchQuery: string, numResults = 2): Promise<st
     return allUrls.slice(0, numResults);
 };
 
-const scrapeFullPageContent = async (context: BrowserContext, url: string): Promise<string> => {
+const scrapeFullPageContent = async (browser: Browser, url: string): Promise<string> => {
     try {
-        const page = await context.newPage();
+        const page = await browser.newPage();
+        await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36');
         await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60000 });
-        const bodyText = await page.locator('body').innerText();
+        const bodyText = await page.evaluate(() => document.body.innerText);
         await page.close();
         return bodyText;
     } catch (error) {
@@ -314,8 +306,8 @@ const scrapeFullPageContent = async (context: BrowserContext, url: string): Prom
     }
 };
 
-
 const extractStructuredData = async (extractionPrompt: string, content: string) => {
+    // This function remains unchanged...
     const apiKey = process.env.GROQ_API_KEY;
     if (!apiKey) throw new Error("GROQ_API_KEY is not set in environment variables.");
     const model = new ChatGroq({ apiKey, model: "meta-llama/llama-4-maverick-17b-128e-instruct", temperature: 0, maxRetries: 0 });
@@ -345,52 +337,22 @@ export async function POST(req: Request) {
         console.log("Stage 1 complete. Generated plan:", plan);
 
         // STAGE 2
-        const urls = await findRelevantUrls(plan.searchApiQuery);
-        const urlsToScrapeRaw = urls.slice(0, 5);
-        console.log(`Stage 2 complete. Found ${urls.length} URLs, processing top ${urlsToScrapeRaw.length}.`);
+        const urls = await findRelevantUrls(2, plan.searchApiQuery);
+        const urlsToScrape = urls.slice(0, 5);
+        console.log(`Stage 2 complete. Found ${urls.length} URLs, scraping top ${urlsToScrape.length}.`);
 
-        // ** NECESSARY CHANGE 2: Re-implementing the intelligent caching logic **
-        const urlsToScrape: string[] = [];
-        const cachedContents: string[] = [];
-        const CACHE_EXPIRATION_SECONDS = 86400;
-
-        for (const url of urlsToScrapeRaw) {
-            const cacheKey = `scrape_cache:${url}`;
-            const cachedContent = await redis.get<string>(cacheKey);
-            if (cachedContent) {
-                console.log(`  > [CACHE HIT] Using cached content for: ${url}`);
-                cachedContents.push(cachedContent);
-            } else {
-                console.log(`  > [CACHE MISS] URL queued for scraping: ${url}`);
-                urlsToScrape.push(url);
-            }
-        }
-
-        let newlyScrapedContents: string[] = [];
-        if (urlsToScrape.length > 0) {
-            browser = await chromium.puppeteer.launch({
-                args: chromium.args,
-                defaultViewport: chromium.defaultViewport,
-                executablePath: await chromium.executablePath,
-                headless: chromium.headless,
-            }) as unknown as Browser;
-
-            const context = await browser.newContext({
-                 userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-            });
-            const scrapePromises = urlsToScrape.map(async (url) => {
-                const content = await scrapeFullPageContent(context, url);
-                if (!content.startsWith('Error scraping')) {
-                    const cacheKey = `scrape_cache:${url}`;
-                    await redis.set(cacheKey, content, { ex: CACHE_EXPIRATION_SECONDS });
-                }
-                return content;
-            });
-            newlyScrapedContents = await Promise.all(scrapePromises);
-        }
-
-        const combinedContent = [...cachedContents, ...newlyScrapedContents].join('\n\n---\n\n');
+        // ** NECESSARY CHANGE 2: Launch the browser using the Vercel-compatible package **
+         browser = await puppeteer.launch({
+            args: chromium.args,
+            executablePath: await chromium.executablePath(),
+            headless: true,
+        });
         
+        const scrapedContents = await Promise.all(
+            urlsToScrape.map(url => scrapeFullPageContent(browser!, url))
+        );
+        const combinedContent = scrapedContents.join('\n\n---\n\n');
+
         // STAGE 3
         const structuredData = await extractStructuredData(plan.extractionPrompt, combinedContent);
         console.log("Stage 3 complete. Extracted structured data:", structuredData);
@@ -413,5 +375,4 @@ export async function POST(req: Request) {
         }
     }
 }
-
 
