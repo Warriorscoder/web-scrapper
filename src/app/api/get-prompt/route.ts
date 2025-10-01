@@ -338,7 +338,7 @@ export async function POST(req: Request) {
 
         // STAGE 2
         const urls = await findRelevantUrls(2, plan.searchApiQuery);
-        const urlsToScrape = urls.slice(0, 5);
+        const urlsToScrape = urls.slice(0, 2);
         console.log(`Stage 2 complete. Found ${urls.length} URLs, scraping top ${urlsToScrape.length}.`);
 
         // ** NECESSARY CHANGE 2: Launch the browser using the Vercel-compatible package **
