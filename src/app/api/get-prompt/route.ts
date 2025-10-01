@@ -206,7 +206,28 @@ import puppeteer, { Browser } from "puppeteer-core";
 import chromium from "@sparticuz/chromium";
 import { redis } from '../../../lib/redis';
 
-// --- STAGE 1: AI PLANNER ---
+// =================== HELPERS ===================
+
+// Get seconds until midnight for Redis expiry
+const getSecondsUntilMidnight = (): number => {
+    const now = new Date();
+    const midnight = new Date(now);
+    midnight.setUTCHours(24, 0, 0, 0);
+    return Math.floor((midnight.getTime() - now.getTime()) / 1000);
+};
+
+// Typed structure for scraped data
+interface ScrapedPage {
+    title: string | null;
+    metaDescription: string | null;
+    h1: string[];
+    h2: string[];
+    links: string[];
+    bodyText: string;
+    error?: string;
+}
+
+// =================== STAGE 1: AI PLANNER ===================
 const planSchema = z.object({
     searchApiQuery: z.string().describe("A highly optimized, single-line search query string to be used with a Google Search API."),
     extractionPrompt: z.string().describe("A detailed prompt for a different AI model that will run later to extract structured data from the raw search results according to the user's intent."),
@@ -217,7 +238,7 @@ const planParser = StructuredOutputParser.fromZodSchema(planSchema);
 const getPlanFromLLM = async (userPrompt: string): Promise<Plan> => {
     console.log("Stage 1: Generating plan from LLM...");
     const apiKey = process.env.GROQ_API_KEY;
-    if (!apiKey) throw new Error("GROQ_API_KEY is not set in environment variables.");
+    if (!apiKey) throw new Error("GROQ_API_KEY is not set.");
 
     const model = new ChatGroq({
         apiKey,
@@ -261,25 +282,38 @@ const getPlanFromLLM = async (userPrompt: string): Promise<Plan> => {
     return plan;
 };
 
-// --- STAGE 2: URL FINDER & SCRAPER ---
+// =================== STAGE 2: URL FINDER ===================
 interface GoogleSearchItem { link: string; }
+
 const findRelevantUrls = async (numResults = 2, searchQuery: string): Promise<string[]> => {
-    console.log("Stage 2: Fetching relevant URLs from Google...");
+    console.log("Stage 2: Fetching URLs...");
     const apiKey = process.env.GOOGLE_API_KEY;
     const cseId = process.env.GOOGLE_CSE_ID;
-    if (!apiKey || !cseId) throw new Error("Google API Key or CSE ID is not set.");
+    if (!apiKey || !cseId) throw new Error("Google API Key or CSE ID missing.");
 
     const today = new Date().toISOString().split('T')[0];
     const rateLimitKey = `google_api_limit:${today}`;
+    const urlsKey = `scraped_urls:${today}`;
     const DAILY_LIMIT = 90;
 
-    let allUrls: string[] = [];
+    // Load cached URLs
+    const cachedData = await redis.get(urlsKey);
+    let cachedUrls: string[] = [];
+    if (typeof cachedData === "string") {
+        try {
+            cachedUrls = JSON.parse(cachedData) as string[];
+        } catch {
+            cachedUrls = [];
+        }
+    }
+
+    const allUrls: string[] = [...cachedUrls];
     const numRequests = Math.ceil(numResults / 10);
 
-    for (let i = 0; i < numRequests; i++) {
+    for (let i = 0; i < numRequests && allUrls.length < numResults; i++) {
         const currentUsage = await redis.incr(rateLimitKey);
         if (currentUsage === 1) await redis.expire(rateLimitKey, 86400);
-        if (currentUsage > DAILY_LIMIT) throw new Error("Daily Google Search API limit reached.");
+        if (currentUsage > DAILY_LIMIT) throw new Error("Daily Google API limit reached.");
 
         const startIndex = i * 10 + 1;
         const url = `https://www.googleapis.com/customsearch/v1?key=${apiKey}&cx=${cseId}&q=${encodeURIComponent(searchQuery)}&start=${startIndex}`;
@@ -288,7 +322,12 @@ const findRelevantUrls = async (numResults = 2, searchQuery: string): Promise<st
             console.log(`Fetching Google Search page ${i + 1}...`);
             const response = await axios.get(url);
             const items: GoogleSearchItem[] = response.data.items || [];
-            allUrls = allUrls.concat(items.map(item => item.link));
+            const newUrls = items.map(item => item.link);
+            allUrls.push(...newUrls);
+
+            // Store updated list in Redis
+            await redis.set(urlsKey, JSON.stringify(allUrls), { ex: getSecondsUntilMidnight() });
+
             if (items.length < 10) break;
         } catch (err) {
             await redis.decr(rateLimitKey);
@@ -301,31 +340,64 @@ const findRelevantUrls = async (numResults = 2, searchQuery: string): Promise<st
     return allUrls.slice(0, numResults);
 };
 
-const scrapeFullPageContent = async (browser: Browser, url: string): Promise<string> => {
+// =================== STAGE 2b: SCRAPER ===================
+const scrapeFullPageContent = async (browser: Browser, url: string): Promise<ScrapedPage> => {
     console.log(`Scraping URL: ${url}`);
     try {
         const page = await browser.newPage();
-        await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36');
-        await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 45000 }); // 45s timeout
-        const bodyText = await page.evaluate(() => document.body.innerText);
+        await page.setUserAgent(
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
+        );
+        await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 45000 });
+
+        const data = await page.evaluate(() => {
+            const getText = (selector: string): string[] =>
+                Array.from(document.querySelectorAll(selector)).map(el => el.textContent?.trim() || "");
+
+            return {
+                title: document.title || null,
+                metaDescription: document.querySelector("meta[name='description']")?.getAttribute("content") || null,
+                h1: getText("h1"),
+                h2: getText("h2"),
+                links: Array.from(document.querySelectorAll("a")).map(a => (a as HTMLAnchorElement).href),
+                bodyText: document.body.innerText || "",
+            };
+        });
+
         await page.close();
-        console.log(`Scraping complete for URL: ${url}`);
-        return bodyText;
+        return data;
     } catch (error) {
-        console.error(`Error scraping URL ${url}:`, error);
-        return `Error scraping ${url}: ${error instanceof Error ? error.message : 'Unknown error'}`;
+        console.error(`Error scraping ${url}:`, error);
+        return {
+            title: null,
+            metaDescription: null,
+            h1: [],
+            h2: [],
+            links: [],
+            bodyText: "",
+            error: error instanceof Error ? error.message : "Unknown error"
+        };
     }
 };
 
-// --- STAGE 3: Structured Data Extraction ---
-const extractStructuredData = async (extractionPrompt: string, content: string) => {
-    console.log("Stage 3: Extracting structured data from content...");
+// =================== STAGE 3: EXTRACTION ===================
+const extractStructuredData = async (
+    extractionPrompt: string,
+    contents: { url: string; content: ScrapedPage }[]
+): Promise<unknown> => {
+    console.log("Stage 3: Extracting structured data...");
     const apiKey = process.env.GROQ_API_KEY;
     if (!apiKey) throw new Error("GROQ_API_KEY is not set.");
 
-    const model = new ChatGroq({ apiKey, model: "meta-llama/llama-4-maverick-17b-128e-instruct", temperature: 0, maxRetries: 0 });
+    const model = new ChatGroq({
+        apiKey,
+        model: "meta-llama/llama-4-maverick-17b-128e-instruct",
+        temperature: 0,
+        maxRetries: 0
+    });
+
     const promptTemplate = new PromptTemplate({
-        template: `{extraction_prompt}\n\nHere is the raw text to analyze:\n---\n{raw_content}\n---\nYour response must be ONLY the valid JSON data you have extracted.`,
+        template: `{extraction_prompt}\n\nHere are multiple scraped pages:\n{raw_content}\n\nReturn ONLY valid JSON.`,
         inputVariables: ["extraction_prompt", "raw_content"],
     });
 
@@ -333,12 +405,14 @@ const extractStructuredData = async (extractionPrompt: string, content: string) 
     const outputFixingParser = OutputFixingParser.fromLLM(model, primaryParser);
     const chain = promptTemplate.pipe(model).pipe(outputFixingParser);
 
-    const structuredData = await chain.invoke({ extraction_prompt: extractionPrompt, raw_content: content });
-    console.log("Stage 3: Structured data extracted successfully.");
-    return structuredData;
+    const rawContent = contents
+        .map(c => `URL: ${c.url}\nTITLE: ${c.content.title}\nMETA: ${c.content.metaDescription}\nTEXT: ${c.content.bodyText}`)
+        .join("\n\n---\n\n");
+
+    return await chain.invoke({ extraction_prompt: extractionPrompt, raw_content: rawContent });
 };
 
-// --- MAIN API HANDLER ---
+// =================== MAIN API HANDLER ===================
 export async function POST(req: Request) {
     const { prompt } = await req.json();
     if (!prompt) {
@@ -349,10 +423,9 @@ export async function POST(req: Request) {
 
     try {
         const plan = await getPlanFromLLM(prompt);
-
         const urls = await findRelevantUrls(2, plan.searchApiQuery);
-        const urlsToScrape = urls.slice(0, 2);
-        console.log(`Preparing to scrape top ${urlsToScrape.length} URLs:`, urlsToScrape);
+
+        console.log(`Scraping top ${urls.length} URLs:`, urls);
 
         browser = await puppeteer.launch({
             args: chromium.args,
@@ -360,19 +433,28 @@ export async function POST(req: Request) {
             headless: true,
         });
 
-        const scrapedContents: string[] = [];
-        for (const url of urlsToScrape) {
-            const content = await scrapeFullPageContent(browser, url);
-            scrapedContents.push(content);
+        const scrapedContents: { url: string; content: ScrapedPage }[] = [];
+
+        for (const url of urls) {
+            const cacheKey = `scraped:${url}`;
+            const cached = await redis.get(cacheKey);
+
+            let content: ScrapedPage;
+            if (typeof cached === "string") {
+                console.log(`Using cached data for ${url}`);
+                content = JSON.parse(cached) as ScrapedPage;
+            } else {
+                content = await scrapeFullPageContent(browser, url);
+                await redis.set(cacheKey, JSON.stringify(content), { ex: getSecondsUntilMidnight() });
+                console.log(`Cached new data for ${url}`);
+            }
+
+            scrapedContents.push({ url, content });
         }
 
-        const combinedContent = scrapedContents.join('\n\n---\n\n');
-        console.log("All URLs scraped. Combined content length:", combinedContent.length);
-
-        const structuredData = await extractStructuredData(plan.extractionPrompt, combinedContent);
+        const structuredData = await extractStructuredData(plan.extractionPrompt, scrapedContents);
 
         return NextResponse.json({ plan, structuredData }, { status: 200 });
-
     } catch (error: unknown) {
         const errorMessage = error instanceof Error ? error.message : 'Unknown server error';
         console.error("API Handler Error:", errorMessage);
@@ -382,10 +464,11 @@ export async function POST(req: Request) {
         return NextResponse.json({ message: errorMessage }, { status: 500 });
     } finally {
         if (browser) {
-            console.log("Closing browser...");
             await browser.close();
         }
     }
 }
+
+
 
 
