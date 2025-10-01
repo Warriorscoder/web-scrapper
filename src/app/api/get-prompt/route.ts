@@ -221,7 +221,8 @@ const extractStructuredData = async (
     const outputFixingParser = OutputFixingParser.fromLLM(model, primaryParser);
     const chain = promptTemplate.pipe(model).pipe(outputFixingParser);
 
-    const chunks = chunkContents(contents, 3500);
+    // <-- Updated chunk size here to 1800 tokens
+    const chunks = chunkContents(contents, 1800);
     console.log(`Stage 3: Split into ${chunks.length} chunk(s)`);
 
     const allResults: unknown[] = [];
@@ -244,6 +245,7 @@ const extractStructuredData = async (
 
     return allResults;
 };
+
 
 // =================== MAIN API HANDLER ===================
 export async function POST(req: Request) {
