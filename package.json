@@ -12,7 +12,7 @@
     "@langchain/core": "^0.3.75",
     "@langchain/groq": "^0.2.3",
     "@radix-ui/react-slot": "^1.2.3",
-    "@sparticuz/chromium-min": "^138.0.2",
+    "@sparticuz/chromium": "^140.0.0",
     "@upstash/redis": "^1.35.4",
     "axios": "^1.11.0",
     "class-variance-authority": "^0.7.1",

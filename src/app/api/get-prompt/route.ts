@@ -91,10 +91,10 @@
 //         if (currentUsage > DAILY_LIMIT) {
 //             throw new Error("The application's daily Google Search API limit has been reached.");
 //         }
-        
+
 //         const startIndex = i * 10 + 1;
 //         const url = `https://www.googleapis.com/customsearch/v1?key=${apiKey}&cx=${cseId}&q=${encodeURIComponent(searchQuery)}&start=${startIndex}`;
-        
+
 //         try {
 //             const response = await axios.get(url);
 //             const items: GoogleSearchItem[] = response.data.items || [];
@@ -106,7 +106,7 @@
 //             break;
 //         }
 //     }
-    
+
 //     return allUrls.slice(0, numResults);
 // };
 
@@ -150,7 +150,7 @@
 //     }
 
 //     let browser = null;
-    
+
 //     try {
 //         // STAGE 1
 //         const plan = await getPlanFromLLM(prompt);
@@ -203,8 +203,8 @@ import { PromptTemplate } from "@langchain/core/prompts";
 import { z } from "zod";
 import axios from 'axios';
 import puppeteer, { Browser } from "puppeteer-core";
-import chromium from "@sparticuz/chromium-min";
-import { redis } from '../../../lib/redis'; 
+import chromium from "@sparticuz/chromium";
+import { redis } from '../../../lib/redis';
 
 // --- STAGE 1: AI PLANNER ---
 
@@ -330,7 +330,7 @@ export async function POST(req: Request) {
     }
 
     let browser: Browser | null = null;
-    
+
     try {
         // STAGE 1
         const plan = await getPlanFromLLM(prompt);
@@ -342,12 +342,13 @@ export async function POST(req: Request) {
         console.log(`Stage 2 complete. Found ${urls.length} URLs, scraping top ${urlsToScrape.length}.`);
 
         // ** NECESSARY CHANGE 2: Launch the browser using the Vercel-compatible package **
-         browser = await puppeteer.launch({
+        browser = await puppeteer.launch({
             args: chromium.args,
             executablePath: await chromium.executablePath(),
             headless: true,
         });
-        
+
+
         const scrapedContents = await Promise.all(
             urlsToScrape.map(url => scrapeFullPageContent(browser!, url))
         );
