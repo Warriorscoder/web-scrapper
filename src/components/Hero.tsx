@@ -10,7 +10,7 @@ interface ScrapeResult {
         searchApiQuery: string;
         extractionPrompt: string;
     };
-    structuredData: Record<string, unknown>[]; 
+    structuredData: Record<string, unknown>[]; // ✅ flat, not chunked
 }
 
 function Hero() {
@@ -23,18 +23,15 @@ function Hero() {
     const fetchRequestStatus = async () => {
         try {
             const response = await axios.get('/api/rate-limit-status');
-            console.log("hero res ", response)
             setDailyRequestsLeft(response.data.requestsRemaining);
         } catch (error) {
             console.error("Could not fetch request status:", error);
-            // setDailyRequestsLeft(90); // Fallback to the default limit
         }
     };
 
     useEffect(() => {
         fetchRequestStatus();
     }, []);
-
 
     useEffect(() => {
         if (textareaRef.current) {
@@ -51,7 +48,22 @@ function Hero() {
 
         try {
             const response = await axios.post('/api/get-prompt', { prompt });
-            setScrapeResult(response.data);
+
+            // ✅ Flatten chunked structured data safely
+            const flattenedData: Record<string, unknown>[] = [];
+            if (Array.isArray(response.data.structuredData)) {
+                response.data.structuredData.forEach((chunk: unknown) => {
+                    if (Array.isArray(chunk)) {
+                        flattenedData.push(...chunk);
+                    }
+                });
+            }
+
+            setScrapeResult({
+                plan: response.data.plan,
+                structuredData: flattenedData, // ✅ matches new type
+            });
+
             if (dailyRequestsLeft !== null) {
                 setDailyRequestsLeft(prev => (prev !== null ? prev - 1 : 0));
             }
@@ -74,7 +86,7 @@ function Hero() {
     };
     
     const handleDownload = async () => {
-        if (!scrapeResult || !scrapeResult.structuredData || !Array.isArray(scrapeResult.structuredData) || scrapeResult.structuredData.length === 0) {
+        if (!scrapeResult || !scrapeResult.structuredData || scrapeResult.structuredData.length === 0) {
             toast.error("No data available to download.");
             return;
         }
@@ -134,9 +146,13 @@ function Hero() {
                                      <tr>{tableHeaders.map(header => <th key={header} className="py-3 px-6">{header}</th>)}</tr>
                                  </thead>
                                  <tbody>
-                                     {scrapeResult.structuredData && Array.isArray(scrapeResult.structuredData) && scrapeResult.structuredData.length > 0 ? scrapeResult.structuredData.map((row, index) => (
+                                     {scrapeResult.structuredData && scrapeResult.structuredData.length > 0 ? scrapeResult.structuredData.map((row, index) => (
                                          <tr key={index} className="bg-gray-900/50 border-b border-gray-700">
-                                             {tableHeaders.map(header => <td key={header} className="py-4 px-6 break-words">{String(row[header])}</td>)}
+                                             {tableHeaders.map(header => (
+                                                 <td key={header} className="py-4 px-6 break-words">
+                                                     {String((row as Record<string, unknown>)[header] ?? "N/A")}
+                                                 </td>
+                                             ))}
                                          </tr>
                                      )) : (
                                          <tr><td colSpan={tableHeaders.length || 1} className="text-center py-4">No structured data was extracted.</td></tr>
@@ -152,7 +168,6 @@ function Hero() {
                 ) : (
                     <div className="w-full">
                          <div className="h-8 mb-2">
-                            {/* ** NECESSARY CHANGE: Display the daily limit reached message ** */}
                             {dailyRequestsLeft !== null && dailyRequestsLeft <= 0 && (
                                 <div className="text-yellow-400 animate-fade-in-up">
                                     Today&apos;s limit has been reached. Please come back tomorrow.
@@ -183,7 +198,6 @@ function Hero() {
 
 export default Hero;
 
-
 const SendIcon = ({ className }: { className?: string }) => (
   <svg
     className={className}
@@ -203,4 +217,26 @@ const SendIcon = ({ className }: { className?: string }) => (
   </svg>
 );
 
-const LoadingSpinner = () => (<svg className="animate-spin h-6 w-6 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg>);
+const LoadingSpinner = () => (
+  <svg
+    className="animate-spin h-6 w-6 text-white"
+    xmlns="http://www.w3.org/2000/svg"
+    fill="none"
+    viewBox="0 0 24 24"
+  >
+    <circle
+      className="opacity-25"
+      cx="12"
+      cy="12"
+      r="10"
+      stroke="currentColor"
+      strokeWidth="4"
+    ></circle>
+    <path
+      className="opacity-75"
+      fill="currentColor"
+      d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0
+      c0 3.042 1.135 5.824 3 7.938l3-2.647z"
+    ></path>
+  </svg>
+);
