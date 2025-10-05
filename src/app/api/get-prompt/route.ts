@@ -17,49 +17,19 @@ const getSecondsUntilMidnight = (): number => {
     return Math.floor((midnight.getTime() - now.getTime()) / 1000);
 };
 
-export interface ScrapedPage {
-    job_title: string | null;
-    company_name: string | null;
-    location: string | null;
-    job_type: string | null;
-    work_mode: string | null;
-    salary_range: string | null;
-    experience_level: string | null;
-    skills_required: string | null;
-    job_description: string | null;
-    posted_date: string | null;
-    apply_link: string | null;
-    industry: string | null;
-    education_requirement: string | null;
-    source_website: string;
-    error?: string;
-}
-
 const estimateTokens = (text: string): number => Math.ceil(text.length / 4);
 
+// Updated chunkContents to handle raw string contents
 function chunkContents(
-    contents: { url: string; content: ScrapedPage }[],
+    contents: { url: string; content: string }[],
     maxTokens = 3500
-): { url: string; content: ScrapedPage }[][] {
-    const chunks: { url: string; content: ScrapedPage }[][] = [];
-    let currentChunk: { url: string; content: ScrapedPage }[] = [];
+): { url: string; content: string }[][] {
+    const chunks: { url: string; content: string }[][] = [];
+    let currentChunk: { url: string; content: string }[] = [];
     let currentTokens = 0;
 
     for (const item of contents) {
-        const itemText = `URL: ${item.url}
-Job Title: ${item.content.job_title}
-Company: ${item.content.company_name}
-Location: ${item.content.location}
-Type: ${item.content.job_type}
-Work Mode: ${item.content.work_mode}
-Salary: ${item.content.salary_range}
-Experience: ${item.content.experience_level}
-Skills: ${item.content.skills_required}
-Description: ${item.content.job_description}
-Posted Date: ${item.content.posted_date}
-Apply Link: ${item.content.apply_link}`;
-
-        const itemTokens = estimateTokens(itemText);
+        const itemTokens = estimateTokens(item.content);
 
         if (currentTokens + itemTokens > maxTokens && currentChunk.length > 0) {
             chunks.push(currentChunk);
@@ -181,7 +151,7 @@ interface PuppeteerPage extends Page {
     waitForTimeout(ms: number): Promise<void>;
 }
 
-const scrapeFullPageContent = async (browser: Browser, url: string): Promise<ScrapedPage> => {
+const scrapeFullPageContent = async (browser: Browser, url: string): Promise<string> => {
     const page = await browser.newPage();
     await page.setUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36");
     const p = page as PuppeteerPage;
@@ -193,72 +163,29 @@ const scrapeFullPageContent = async (browser: Browser, url: string): Promise<Scr
         const expandButtons = await p.$x("//button[contains(., 'Read more') or contains(., 'Show more')]");
         if (expandButtons.length > 0) { await expandButtons[0].click(); await p.waitForTimeout(1500); }
 
-        const data: ScrapedPage = await p.evaluate(() => {
-            const getText = (selector: string): string | null => document.querySelector(selector)?.textContent?.trim() || null;
-            const getByKeywords = (keywords: string[]): string | null => {
-                const allElements = Array.from(document.querySelectorAll("body *")).filter(el => el.textContent && el.textContent.trim().length < 300);
-                for (const el of allElements) { const text = el.textContent?.trim().toLowerCase() || ""; if (keywords.some(k => text.includes(k))) return el.textContent?.trim() || null; }
-                return null;
-            };
-            const getJobDescription = (): string | null => {
-                const desc = document.querySelector("section.job-description, div.job-description, .description, #jobDescriptionText");
-                if (desc) return desc.textContent?.trim() || null;
-                const text = document.body.innerText;
-                const match = text.match(/(Responsibilities|Description|Duties|Overview)[\s\S]{100,}/i);
-                return match ? match[0].trim() : null;
-            };
-            const getApplyLink = (): string | null => {
-                const linkEl = Array.from(document.querySelectorAll("a, button")).find(el => /apply/i.test(el.textContent || ""));
-                if (!linkEl) return null;
-                if (linkEl instanceof HTMLAnchorElement && linkEl.href) return linkEl.href;
-                return linkEl.getAttribute("data-url") || linkEl.getAttribute("onclick") || null;
-            };
-
-            return {
-                job_title: getText("h1"),
-                company_name: getByKeywords(["company", "employer", "organization", "hiring"]),
-                location: getByKeywords(["location", "remote", "hybrid", "on-site", "city", "state"]),
-                job_type: getByKeywords(["full-time", "part-time", "internship", "contract"]),
-                work_mode: getByKeywords(["remote", "hybrid", "on-site"]),
-                salary_range: getByKeywords(["salary", "pay", "compensation", "package"]),
-                experience_level: getByKeywords(["junior", "senior", "mid-level", "entry", "lead"]),
-                skills_required: getByKeywords(["skills", "technologies", "requirements", "proficient"]),
-                job_description: getJobDescription(),
-                posted_date: getByKeywords(["posted", "date", "updated"]),
-                apply_link: getApplyLink(),
-                industry: getByKeywords(["industry", "sector", "field"]),
-                education_requirement: getByKeywords(["education", "degree", "qualification"]),
-                source_website: window.location.hostname,
-            };
-        });
-
+        const rawContent = await p.evaluate(() => document.body.innerText || "");
         await p.close();
-        return data;
+        console.log(`[Scraper] Successfully scraped raw content for ${url}`);
+        return rawContent;
 
     } catch (_error) {
         await p.close();
-        return {
-            job_title: null, company_name: null, location: null, job_type: null, work_mode: null,
-            salary_range: null, experience_level: null, skills_required: null, job_description: null,
-            posted_date: null, apply_link: null, industry: null, education_requirement: null,
-            source_website: new URL(url).hostname, error: "Scraping failed",
-        };
+        console.error(`[Scraper] Failed to scrape ${url}:`, _error);
+        return "";
     }
 };
-
-
 
 // =================== STAGE 3: EXTRACTION ===================
 const extractStructuredData = async (
     extractionPrompt: string,
-    contents: { url: string; content: ScrapedPage }[]
+    contents: { url: string; content: string }[]
 ): Promise<unknown[]> => {
     const apiKey = process.env.GROQ_API_KEY;
     if (!apiKey) throw new Error("GROQ_API_KEY is not set.");
 
     const model = new ChatGroq({ apiKey, model: "meta-llama/llama-4-maverick-17b-128e-instruct", temperature: 0 });
     const promptTemplate = new PromptTemplate({
-        template: `{extraction_prompt}\n\nHere are scraped pages:\n{raw_content}\n\nReturn ONLY valid JSON.`,
+        template: `{extraction_prompt}\n\nHere are raw scraped pages:\n{raw_content}\n\nReturn ONLY valid JSON.`,
         inputVariables: ["extraction_prompt", "raw_content"],
     });
 
@@ -270,21 +197,7 @@ const extractStructuredData = async (
     const allResults: unknown[] = [];
 
     for (let i = 0; i < chunks.length; i++) {
-        const rawContent = chunks[i].map(c =>
-            `URL: ${c.url}
-Job Title: ${c.content.job_title}
-Company: ${c.content.company_name}
-Location: ${c.content.location}
-Type: ${c.content.job_type}
-Work Mode: ${c.content.work_mode}
-Salary: ${c.content.salary_range}
-Experience: ${c.content.experience_level}
-Skills: ${c.content.skills_required}
-Description: ${c.content.job_description}
-Posted Date: ${c.content.posted_date}
-Apply Link: ${c.content.apply_link}`
-        ).join("\n\n---\n\n");
-
+        const rawContent = chunks[i].map(c => `URL: ${c.url}\nContent:\n${c.content}`).join("\n\n---\n\n");
         try { allResults.push(await chain.invoke({ extraction_prompt: extractionPrompt, raw_content: rawContent })); }
         catch { allResults.push({ error: `Failed to process chunk ${i + 1}` }); }
     }
@@ -309,57 +222,41 @@ export async function POST(req: Request) {
     try {
         console.log("[API] Generating plan from LLM...");
         const plan = await getPlanFromLLM(prompt);
-        console.log("[API] Plan generated:", plan);
 
         console.log("[API] Fetching relevant URLs...");
         const urls = await findRelevantUrls(5, plan.searchApiQuery);
-        console.log(`[API] URLs found (${urls.length}):`, urls);
 
         browser = await puppeteer.launch({
             args: chromium.args,
             executablePath: await chromium.executablePath(),
             headless: true,
         });
-        console.log("[API] Puppeteer browser launched");
 
-        const scrapedContents: { url: string; content: ScrapedPage }[] = [];
+        const scrapedContents: { url: string; content: string }[] = [];
 
         for (const url of urls) {
-            console.log("[API] Processing URL:", url);
             const cacheKey = `scraped:${url}`;
             const cached = await redis.get(cacheKey);
 
-            let content: ScrapedPage;
+            let content: string;
             if (typeof cached === "string") {
-                content = JSON.parse(cached);
-                console.log("[API] Loaded cached content for URL:", url);
+                content = cached;
             } else {
-                console.log("[API] Scraping page:", url);
                 content = await scrapeFullPageContent(browser, url);
-                console.log("[API] Scraping result:", content);
-                await redis.set(cacheKey, JSON.stringify(content), { ex: getSecondsUntilMidnight() });
-                console.log("[API] Cached scraped content for URL:", url);
+                await redis.set(cacheKey, content, { ex: getSecondsUntilMidnight() });
             }
 
             scrapedContents.push({ url, content });
         }
 
-        console.log("[API] Extracting structured data...");
         const structuredData = await extractStructuredData(plan.extractionPrompt, scrapedContents);
-        console.log("[API] Structured data extraction complete:", structuredData);
-
         return NextResponse.json({ plan, structuredData }, { status: 200 });
 
     } catch (error: unknown) {
         const errorMessage = error instanceof Error ? error.message : 'Unknown server error';
-        console.error("[API] Error occurred:", errorMessage);
         return NextResponse.json({ message: errorMessage }, { status: 500 });
 
     } finally {
-        if (browser) {
-            console.log("[API] Closing Puppeteer browser");
-            await browser.close();
-        }
+        if (browser) await browser.close();
     }
 }
-
