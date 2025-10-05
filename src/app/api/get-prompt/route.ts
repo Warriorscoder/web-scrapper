@@ -294,43 +294,72 @@ Apply Link: ${c.content.apply_link}`
 
 // =================== MAIN API HANDLER ===================
 export async function POST(req: Request) {
+    console.log("[API] POST /get-prompt called");
+
     const { prompt } = await req.json();
-    if (!prompt) return NextResponse.json({ message: 'Prompt is required' }, { status: 400 });
+    console.log("[API] User prompt received:", prompt);
+
+    if (!prompt) {
+        console.warn("[API] No prompt provided");
+        return NextResponse.json({ message: 'Prompt is required' }, { status: 400 });
+    }
 
     let browser: Browser | null = null;
 
     try {
+        console.log("[API] Generating plan from LLM...");
         const plan = await getPlanFromLLM(prompt);
+        console.log("[API] Plan generated:", plan);
+
+        console.log("[API] Fetching relevant URLs...");
         const urls = await findRelevantUrls(5, plan.searchApiQuery);
+        console.log(`[API] URLs found (${urls.length}):`, urls);
 
         browser = await puppeteer.launch({
             args: chromium.args,
             executablePath: await chromium.executablePath(),
             headless: true,
         });
+        console.log("[API] Puppeteer browser launched");
 
         const scrapedContents: { url: string; content: ScrapedPage }[] = [];
+
         for (const url of urls) {
+            console.log("[API] Processing URL:", url);
             const cacheKey = `scraped:${url}`;
             const cached = await redis.get(cacheKey);
 
             let content: ScrapedPage;
-            if (typeof cached === "string") content = JSON.parse(cached);
-            else {
+            if (typeof cached === "string") {
+                content = JSON.parse(cached);
+                console.log("[API] Loaded cached content for URL:", url);
+            } else {
+                console.log("[API] Scraping page:", url);
                 content = await scrapeFullPageContent(browser, url);
+                console.log("[API] Scraping result:", content);
                 await redis.set(cacheKey, JSON.stringify(content), { ex: getSecondsUntilMidnight() });
+                console.log("[API] Cached scraped content for URL:", url);
             }
 
             scrapedContents.push({ url, content });
         }
 
+        console.log("[API] Extracting structured data...");
         const structuredData = await extractStructuredData(plan.extractionPrompt, scrapedContents);
+        console.log("[API] Structured data extraction complete:", structuredData);
+
         return NextResponse.json({ plan, structuredData }, { status: 200 });
 
     } catch (error: unknown) {
         const errorMessage = error instanceof Error ? error.message : 'Unknown server error';
+        console.error("[API] Error occurred:", errorMessage);
         return NextResponse.json({ message: errorMessage }, { status: 500 });
+
     } finally {
-        if (browser) await browser.close();
+        if (browser) {
+            console.log("[API] Closing Puppeteer browser");
+            await browser.close();
+        }
     }
 }
+
