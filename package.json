@@ -22,6 +22,7 @@
     "lucide-react": "^0.542.0",
     "next": "15.5.2",
     "playwright-core": "^1.55.1",
+    "puppeteer": "^24.23.0",
     "puppeteer-core": "^24.22.3",
     "react": "19.1.0",
     "react-dom": "19.1.0",
