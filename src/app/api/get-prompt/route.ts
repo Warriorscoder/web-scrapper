@@ -152,31 +152,7 @@ interface PuppeteerPage extends Page {
 
 // =================== STAGE 3: EXTRACTION ===================
 
-// export const scrapeFullPageContent = async (browser: Browser, url: string): Promise<string> => {
-//   const page = await browser.newPage();
-//   await page.setUserAgent(
-//     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36"
-//   );
-
-//   try {
-//     await page.goto(url, { waitUntil: "networkidle2", timeout: 60000 });
-//     await page.waitForSelector("body", { timeout: 20000 }).catch(() => null);
-
-//     // Extract only visible text content
-//     const content = await page.evaluate(() => document.body?.innerText?.trim() || "");
-
-//     console.log(`[Scraper] ✅ Scraped ${url} (${content.length} chars)`);
-
-//     return content;
-//   } catch (error) {
-//     console.error(`[Scraper] ❌ Failed to scrape ${url}:`, error);
-//     return "";
-//   } finally {
-//     await page.close();
-//   }
-// };
-
-export const scrapeFullPageContent = async (browser: Browser, url: string): Promise<string> => {
+const scrapeFullPageContent = async (browser: Browser, url: string): Promise<string> => {
   const page = await browser.newPage();
   await page.setUserAgent(
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36"
