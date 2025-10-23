@@ -85,7 +85,7 @@ const getPlanFromLLM = async (userPrompt: string): Promise<Plan> => {
         - Schema must be suitable for tabular export (Excel/CSV).
         - Values must be human-readable, clean, and consistent.
         - Strictly exclude the following sources from search or extraction:
-
+        - Stricly check the date of the job posting to ensure it is posted      today or yesterday not older than that .
         
 
         - Also exclude Reddit from search results.
@@ -105,7 +105,7 @@ const getPlanFromLLM = async (userPrompt: string): Promise<Plan> => {
 };
 
 // =================== STAGE 2: URL FETCHER ===================
-const findRelevantUrls = async (numResults = 1, searchQuery: string): Promise<string[]> => {
+const findRelevantUrls = async (numResults = 3, searchQuery: string): Promise<string[]> => {
     const apiKey = process.env.GOOGLE_API_KEY;
     const cseId = process.env.GOOGLE_CSE_ID;
     if (!apiKey || !cseId) throw new Error("Google API Key or CSE ID missing.");
@@ -294,7 +294,7 @@ export async function POST(req: Request) {
         const plan = await getPlanFromLLM(prompt);
 
         console.log("[API] Fetching relevant URLs...");
-        const urls = await findRelevantUrls(1, plan.searchApiQuery);
+        const urls = await findRelevantUrls(3, plan.searchApiQuery);
 
         browser = await puppeteer.launch({
             args: chromium.args,
