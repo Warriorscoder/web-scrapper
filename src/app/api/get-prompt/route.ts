@@ -86,8 +86,7 @@ const getPlanFromLLM = async (userPrompt: string): Promise<Plan> => {
         - Values must be human-readable, clean, and consistent.
         - Strictly exclude the following sources from search or extraction:
 
-        **Exclude List (no scraping / automated extraction):**
-        naukri.com, linkedin.com, timesjobs.com, shine.com, indeed.com, freshersworld.com, internshala.com, quikr.com, wisdomjobs.com, monsterindia.com, foundit.in, careerbuilder.co.in, iimjobs.com, glassdoor.co.in, apna.co, angel.co, workindia.in, greenjobs.oorzo.co, jobtrendsindia.com, evermorejobs.com, maxjobs.in, thejobzilla.com
+        
 
         - Also exclude Reddit from search results.
 
@@ -106,7 +105,7 @@ const getPlanFromLLM = async (userPrompt: string): Promise<Plan> => {
 };
 
 // =================== STAGE 2: URL FETCHER ===================
-const findRelevantUrls = async (numResults = 5, searchQuery: string): Promise<string[]> => {
+const findRelevantUrls = async (numResults = 1, searchQuery: string): Promise<string[]> => {
     const apiKey = process.env.GOOGLE_API_KEY;
     const cseId = process.env.GOOGLE_CSE_ID;
     if (!apiKey || !cseId) throw new Error("Google API Key or CSE ID missing.");
@@ -141,7 +140,7 @@ const findRelevantUrls = async (numResults = 5, searchQuery: string): Promise<st
             if (items.length < 10) break;
         } catch { await redis.decr(rateLimitKey); break; }
     }
-
+    console.log(`[URL Fetcher] Retrieved ${allUrls.slice(0, numResults)} URLs for query: "${searchQuery}"`);
     return allUrls.slice(0, numResults);
 };
 
@@ -151,59 +150,154 @@ interface PuppeteerPage extends Page {
     waitForTimeout(ms: number): Promise<void>;
 }
 
-const scrapeFullPageContent = async (browser: Browser, url: string): Promise<string> => {
-    const page = await browser.newPage();
-    await page.setUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36");
-    const p = page as PuppeteerPage;
-
-    try {
-        await p.goto(url, { waitUntil: "networkidle2", timeout: 60000 });
-        await p.waitForSelector("body", { timeout: 20000 }).catch(() => null);
-
-        const expandButtons = await p.$x("//button[contains(., 'Read more') or contains(., 'Show more')]");
-        if (expandButtons.length > 0) { await expandButtons[0].click(); await p.waitForTimeout(1500); }
-
-        const rawContent = await p.evaluate(() => document.body.innerText || "");
-        await p.close();
-        console.log(`[Scraper] Successfully scraped raw content for ${url}`);
-        return rawContent;
-
-    } catch (_error) {
-        await p.close();
-        console.error(`[Scraper] Failed to scrape ${url}:`, _error);
-        return "";
-    }
-};
-
 // =================== STAGE 3: EXTRACTION ===================
-const extractStructuredData = async (
-    extractionPrompt: string,
-    contents: { url: string; content: string }[]
-): Promise<unknown[]> => {
-    const apiKey = process.env.GROQ_API_KEY;
-    if (!apiKey) throw new Error("GROQ_API_KEY is not set.");
 
-    const model = new ChatGroq({ apiKey, model: "meta-llama/llama-4-maverick-17b-128e-instruct", temperature: 0 });
-    const promptTemplate = new PromptTemplate({
-        template: `{extraction_prompt}\n\nHere are raw scraped pages:\n{raw_content}\n\nReturn ONLY valid JSON.`,
-        inputVariables: ["extraction_prompt", "raw_content"],
+// export const scrapeFullPageContent = async (browser: Browser, url: string): Promise<string> => {
+//   const page = await browser.newPage();
+//   await page.setUserAgent(
+//     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36"
+//   );
+
+//   try {
+//     await page.goto(url, { waitUntil: "networkidle2", timeout: 60000 });
+//     await page.waitForSelector("body", { timeout: 20000 }).catch(() => null);
+
+//     // Extract only visible text content
+//     const content = await page.evaluate(() => document.body?.innerText?.trim() || "");
+
+//     console.log(`[Scraper] ✅ Scraped ${url} (${content.length} chars)`);
+
+//     return content;
+//   } catch (error) {
+//     console.error(`[Scraper] ❌ Failed to scrape ${url}:`, error);
+//     return "";
+//   } finally {
+//     await page.close();
+//   }
+// };
+
+export const scrapeFullPageContent = async (browser: Browser, url: string): Promise<string> => {
+  const page = await browser.newPage();
+  await page.setUserAgent(
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36"
+  );
+
+  try {
+    await page.goto(url, { waitUntil: "networkidle2", timeout: 60000 });
+    await page.waitForSelector("body", { timeout: 20000 }).catch(() => null);
+
+    // Extract job-related content specifically
+    const rawJobText = await page.evaluate(() => {
+      const getText = (selector: string) => {
+        const el = document.querySelector(selector);
+        return el ? el.textContent?.trim() || "" : "";
+      };
+
+      const findByText = (regex: RegExp): string => {
+        const el = Array.from(document.querySelectorAll("body *"))
+          .find((e) => regex.test(e.textContent || ""));
+        return el ? el.textContent?.trim() || "" : "";
+      };
+
+      const parts: string[] = [];
+
+      // Capture likely job fields
+      const jobTitle = getText("h1") || getText("[data-test='jobTitle']") || findByText(/job title|position/i);
+      const company = getText(".company") || findByText(/company|employer/i);
+      const location = getText(".location") || findByText(/location|city|remote/i);
+      const salary = findByText(/\$|₹|€|£|salary|per year|per hour/i);
+      const experience = findByText(/experience|years|entry level|junior|senior|mid/i);
+      const jobType = findByText(/full[- ]?time|part[- ]?time|contract|remote|hybrid/i);
+      const posted = findByText(/posted|days ago|hours ago|today|yesterday/i);
+      const applyLink = (document.querySelector("a[href*='apply']") as HTMLAnchorElement)?.href || "";
+      const description = findByText(/responsibilit|requirement|description|role/i);
+
+      // Add to text parts (skip empty ones)
+      [jobTitle, company, location, salary, experience, jobType, posted, description, applyLink]
+        .filter(Boolean)
+        .forEach((t) => parts.push(t));
+
+      // Also include the full visible text for context
+      const bodyText = document.body?.innerText?.trim() || "";
+      parts.push(bodyText);
+
+      // Join everything into one unstructured blob
+      return parts.join("\n\n").trim();
     });
 
-    const primaryParser = new JsonOutputParser();
-    const outputFixingParser = OutputFixingParser.fromLLM(model, primaryParser);
-    const chain = promptTemplate.pipe(model).pipe(outputFixingParser);
+    console.log(`[Scraper] ✅ Extracted unstructured job text for ${url} (${rawJobText.length} chars)`);
 
-    const chunks = chunkContents(contents, 1800);
-    const allResults: unknown[] = [];
-
-    for (let i = 0; i < chunks.length; i++) {
-        const rawContent = chunks[i].map(c => `URL: ${c.url}\nContent:\n${c.content}`).join("\n\n---\n\n");
-        try { allResults.push(await chain.invoke({ extraction_prompt: extractionPrompt, raw_content: rawContent })); }
-        catch { allResults.push({ error: `Failed to process chunk ${i + 1}` }); }
-    }
-
-    return allResults;
+    return rawJobText;
+  } catch (error) {
+    console.error(`[Scraper] ❌ Failed to scrape ${url}:`, error);
+    return "";
+  } finally {
+    await page.close();
+  }
 };
+
+
+const extractStructuredData = async (
+  extractionPrompt: string,
+  contents: { url: string; content: string }[]
+): Promise<unknown[]> => {
+  const apiKey = process.env.GROQ_API_KEY;
+  if (!apiKey) throw new Error("GROQ_API_KEY is not set.");
+
+  const model = new ChatGroq({
+    apiKey,
+    model: "meta-llama/llama-4-maverick-17b-128e-instruct",
+    temperature: 0,
+  });
+
+  const promptTemplate = new PromptTemplate({
+    template: `{extraction_prompt}\n\nHere are raw scraped pages:\n{raw_content}\n\nReturn ONLY valid JSON array.`,
+    inputVariables: ["extraction_prompt", "raw_content"],
+  });
+
+  const primaryParser = new JsonOutputParser();
+  const outputFixingParser = OutputFixingParser.fromLLM(model, primaryParser);
+  const chain = promptTemplate.pipe(model).pipe(outputFixingParser);
+
+  // ✅ reduce max token size to stay under Groq limit (safe ~1500 tokens per chunk)
+  const chunks = chunkContents(contents, 1500);
+
+  const allResults: unknown[] = [];
+
+  for (let i = 0; i < chunks.length; i++) {
+    const chunk = chunks[i];
+    const rawContent = chunk
+      .map(c => `URL: ${c.url}\nContent:\n${c.content}`)
+      .join("\n\n---\n\n");
+
+    console.log(`[Extractor] Processing chunk ${i + 1}/${chunks.length} (${rawContent.length} chars)`);
+
+    try {
+      const result = await chain.invoke({
+        extraction_prompt: extractionPrompt,
+        raw_content: rawContent.slice(0, 10000), // hard limit content size
+      });
+
+      if (result) {
+        allResults.push(result);
+        console.log(`[Extractor] ✅ Completed chunk ${i + 1}`);
+      }
+    } catch (error) {
+      console.error(`[Extractor] ❌ Failed chunk ${i + 1}`, error);
+      allResults.push({ error: `Failed to process chunk ${i + 1}` });
+
+      // ✅ Break if model rejects large input repeatedly
+      if (error instanceof Error && error.message.includes("Request too large")) {
+        console.warn("[Extractor] ⚠️ Aborting further chunks due to request size limit.");
+        break;
+      }
+    }
+  }
+
+  console.log(`[Extractor] ✅ Finished all ${allResults.length} chunks.`);
+  return allResults.flat(); // flatten nested arrays if model returns JSON arrays
+};
+
 
 // =================== MAIN API HANDLER ===================
 export async function POST(req: Request) {
@@ -218,17 +312,17 @@ export async function POST(req: Request) {
     }
 
     let browser: Browser | null = null;
-
+    const exicutablePath = process.env.EXICUTABLE_PATH
     try {
         console.log("[API] Generating plan from LLM...");
         const plan = await getPlanFromLLM(prompt);
 
         console.log("[API] Fetching relevant URLs...");
-        const urls = await findRelevantUrls(5, plan.searchApiQuery);
+        const urls = await findRelevantUrls(1, plan.searchApiQuery);
 
         browser = await puppeteer.launch({
             args: chromium.args,
-            executablePath: await chromium.executablePath(),
+            executablePath: exicutablePath || await chromium.executablePath(),
             headless: true,
         });
 
@@ -250,6 +344,7 @@ export async function POST(req: Request) {
         }
 
         const structuredData = await extractStructuredData(plan.extractionPrompt, scrapedContents);
+        console.log("[API] Extraction complete, sending response.", structuredData);
         return NextResponse.json({ plan, structuredData }, { status: 200 });
 
     } catch (error: unknown) {
